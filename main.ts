@@ -1,13 +1,18 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Editor, EditorPosition, MarkdownView, Plugin, PluginSettingTab, Setting } from 'obsidian';
+
+import { FileSuggest } from './file-suggester'
+import { summary } from 'summary';
 
 // Remember to rename these classes and interfaces!
 
 interface MyPluginSettings {
-	mySetting: string;
+	openAPIKey?: string;
+	instructionPath?: string;
+	instruction: string;
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+	instruction: 'summarize the content',
 }
 
 export default class MyPlugin extends Plugin {
@@ -16,66 +21,25 @@ export default class MyPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
 		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+			id: 'summarize-this-note',
+			name: 'Summarize this note',
+			editorCallback: async (editor: Editor, view: MarkdownView) => {
+				const anchor = 'summarizing...\n'
+				editor.replaceSelection(anchor);
+				const instruction = await this.readInstruction();
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
+				const summarized = await summary(this.settings.openAPIKey!, instruction, view.file?.name || 'untitled.md', view.data);
+				const text = editor.getValue();
+				const offset = text.indexOf(anchor)
+				const startPos = getEditorPositionFromIndex(text, offset);
+				const endPos = getEditorPositionFromIndex(text, offset + anchor.length-1);
+				editor.replaceRange(summarized, startPos, endPos);
+				// editor.replaceSelection(summarized + '\n');
 			}
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
 	}
 
 	onunload() {
@@ -86,25 +50,36 @@ export default class MyPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
 
+	async readInstruction() {
+		const defaultInstruction = 'summarize the given content';
+		if (!this.settings.instructionPath) return defaultInstruction;
+
+		const file = this.app.vault.getFileByPath(this.settings.instructionPath);
+		if (!file) return defaultInstruction;
+
+		return await this.app.vault.cachedRead(file)
+	}
+
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+function getEditorPositionFromIndex(
+content: string,
+index: number
+): EditorPosition {
+	const substr = content.substr(0, index);
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+	let l = 0;
+	let offset = -1;
+	let r = -1;
+	for (; (r = substr.indexOf("\n", r + 1)) !== -1; l++, offset = r);
+	offset += 1;
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
+	const ch = content.substr(offset, index - offset).length;
+
+	return { line: l, ch: ch };
 }
 
 class SampleSettingTab extends PluginSettingTab {
@@ -121,14 +96,32 @@ class SampleSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
+			.setName('OpenAI key')
+			.setDesc('Bring your OpenAI key')
+			.addSearch(cb => {
+				cb.setPlaceholder('Example: sk-proj-rxxLFnjNb4FYNnSg4CiaD80ypRtYd2DXljzBFepk6L0t4BH9')
+					.setValue(this.plugin.settings.openAPIKey || '')
+					.onChange(path => {
+						this.plugin.settings.openAPIKey = path;
+						this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Instruction File')
+			.setDesc('Choose your instruction file')
+			.addSearch(cb => {
+				try {
+					new FileSuggest(this.app, cb.inputEl);
+				} catch {
+					// eslint-disable
+				}
+				cb.setPlaceholder('Example: templates/template-file')
+					.setValue(this.plugin.settings.instructionPath || '')
+					.onChange(path => {
+						this.plugin.settings.instructionPath = path;
+						this.plugin.saveSettings();
+					});
+			});
 	}
 }
